@@ -65,7 +65,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: aquasecurity/trivy-action@0.28.0
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scanners: vuln,secret,misconfig
@@ -84,7 +84,7 @@ jobs:
         run: |
           uid=$(docker run --rm --entrypoint id ${{ env.IMAGE_NAME }}:${{ github.sha }} -u)
           echo "uid=$uid"; test "$uid" != "0"
-      - uses: aquasecurity/trivy-action@0.28.0
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
           severity: HIGH,CRITICAL
@@ -103,7 +103,7 @@ jobs:
           terraform fmt -check -recursive
           terraform init -backend=false -input=false
           terraform validate
-      - uses: aquasecurity/trivy-action@0.28.0
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: config
           scan-ref: terraform
