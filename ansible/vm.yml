@@ -1,0 +1,9 @@
+---
+- name: SecureDeploy - hardening en VM local (sin app ni ECR)
+  hosts: securedeploy
+  become: true
+  roles:
+    - base_hardening
+    - auditd
+    - docker
+    - falco

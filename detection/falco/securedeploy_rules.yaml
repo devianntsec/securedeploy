@@ -56,12 +56,12 @@
 # Procesos que leen /etc/shadow o credenciales de forma legítima
 - list: sd_credential_readers
   items: [sshd, ssh, ssh-agent, ssh-keygen, scp, sftp, sudo, su, login, passwd, chage, chpasswd,
-          unix_chkpwd, pwck, polkitd, systemd-logind, cron, atd, git, aws]
+          unix_chkpwd, pwck, grpck, polkitd, systemd, systemd-logind, cron, atd, git, aws]
 
 # Procesos legítimos que hablan con el socket de Docker
 - list: sd_docker_clients
   items: [docker, dockerd, containerd, containerd-shim, runc, docker-init, docker-proxy,
-          docker-compose, buildkitd, amazon-ssm-agen, ssm-agent-worke]
+          docker-compose, buildkitd, amazon-ssm-agen, ssm-agent-worke, falco]
 
 # Procesos legítimos que consultan el servicio de metadatos (IMDS) en el HOST
 - list: sd_imds_clients
@@ -123,6 +123,10 @@
 # runc prepara el contenedor con procesos "runc:[2:INIT]": no son actividad de la app
 - macro: sd_runc_setup
   condition: (proc.name startswith runc)
+
+# Auditoría de hardening del proyecto (make audit-before/after): sus hijos leen /etc/shadow a propósito
+- macro: sd_audit_tooling
+  condition: (proc.pname = lynis)
 
 # Artefactos temporales de Ansible (escrituras atómicas durante `make harden`)
 - macro: sd_ansible_tmp
@@ -425,6 +429,7 @@
     evt.type in (dup, dup2, dup3) and evt.dir = <
     and evt.rawres in (0, 1, 2) and fd.type in (ipv4, ipv6)
     and not sd_runc_setup
+    and not proc.exepath in (/usr/sbin/sshd, /usr/lib/openssh/sshd-session)
   output: >
     Redirección de stdio a socket de red (proc=%proc.name cmd=%proc.cmdline user=%user.name fd=%evt.rawres
     conn=%fd.name parent=%proc.pname container=%container.name)
@@ -465,6 +470,7 @@
          or fd.name glob "/home/*/.aws/credentials" or fd.name glob "/root/.aws/credentials"
          or fd.name = /run/securedeploy/env)
     and not proc.name in (sd_credential_readers)
+    and not sd_audit_tooling
     and not (fd.name = /run/securedeploy/env and proc.name in (docker, securedeploy-ru, bash))
   output: >
     Lectura de credenciales (file=%fd.name proc=%proc.name cmd=%proc.cmdline user=%user.name parent=%proc.pname)
