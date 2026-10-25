@@ -19,7 +19,7 @@ env:
 jobs:
   lint:
     name: Lint (ruff + hadolint)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -32,7 +32,7 @@ jobs:
 
   test:
     name: Tests (pytest, cobertura >= 85%)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,7 +42,7 @@ jobs:
 
   sast:
     name: SAST (Bandit + Semgrep) y dependencias (pip-audit)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -62,7 +62,7 @@ jobs:
 
   trivy-fs:
     name: "Trivy (repo - vulns, secretos, misconfig)"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -75,7 +75,7 @@ jobs:
 
   image:
     name: Build + Trivy (imagen)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [lint, test]
     steps:
       - uses: actions/checkout@v4
@@ -93,7 +93,7 @@ jobs:
 
   iac:
     name: IaC (terraform validate + Trivy config + ansible-lint)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
@@ -112,6 +112,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "${{ env.PYTHON_VERSION }}" }
       - run: pip install ansible-lint
+      - run: cd ansible && ansible-galaxy collection install -r requirements.yml
       - run: cd ansible && ansible-lint --profile production site.yml audit.yml
       - name: Validar reglas Falco (binario real, sin driver)
         run: |
@@ -120,7 +121,7 @@ jobs:
 
   deploy:
     name: Deploy (ECR + SSM)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [lint, test, sast, trivy-fs, image, iac]
     if: github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ENABLED == 'true'
     permissions:
