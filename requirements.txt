@@ -2,4 +2,4 @@ fastapi==0.157.0
 uvicorn==0.54.0
 httpx==0.28.1
 pydantic-settings==2.16.1
-boto3==1.43.116
+boto3==1.43.117
