@@ -122,7 +122,7 @@
 
 # runc prepara el contenedor con procesos "runc:[2:INIT]": no son actividad de la app
 - macro: sd_runc_setup
-  condition: (proc.name startswith runc)
+  condition: (proc.name startswith runc or proc.pname = runc or proc.exepath = /runc)
 
 # Auditoría de hardening del proyecto (make audit-before/after): sus hijos leen /etc/shadow a propósito
 - macro: sd_audit_tooling

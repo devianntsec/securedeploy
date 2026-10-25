@@ -52,6 +52,8 @@
           json_include_tags_property: true
           time_format_iso_8601: true
           priority: notice
+          # Por defecto Falco dispara SOLO la primera regla que coincide; con `all` no se tapan entre sí
+          rule_matching: all
           buffered_outputs: false
           syslog_output:
             enabled: true
