@@ -1,0 +1,49 @@
+---
+- name: Dependencias del repositorio
+  ansible.builtin.apt:
+    name: [ca-certificates, curl, gnupg, awscli, python3-debian]
+    state: present
+
+- name: Clave GPG de Docker
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+
+- name: Repositorio de Docker
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: [deb]
+    uris: https://download.docker.com/linux/ubuntu
+    suites: ["{{ ansible_distribution_release }}"]
+    components: [stable]
+    architectures: [amd64]
+    signed_by: /etc/apt/keyrings/docker.asc
+    state: present
+
+- name: Instalar Docker Engine
+  ansible.builtin.apt:
+    name: [docker-ce, docker-ce-cli, containerd.io]
+    state: present
+    update_cache: true
+
+- name: Configurar daemon.json endurecido
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+    content: |
+      {
+        "icc": false,
+        "no-new-privileges": true,
+        "live-restore": true,
+        "userland-proxy": false,
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "10m", "max-file": "3" }
+      }
+  notify: Restart docker
+
+- name: Docker habilitado
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true

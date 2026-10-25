@@ -1,0 +1,16 @@
+---
+# Aplica el benchmark CIS Ubuntu 22.04 con el rol de ansible-lockdown.
+# Revisa SIEMPRE el --check antes: ansible-playbook cis.yml --check --diff
+- name: CIS Level 1 (ansible-lockdown)
+  hosts: securedeploy
+  become: true
+  vars:
+    ubuntu22cis_disruption_high: false   # evita reglas que pueden dejarte sin acceso o romper Docker
+    ubuntu22cis_level_1: true
+    ubuntu22cis_level_2: false
+    ubuntu22cis_ipv4_required: true
+    ubuntu22cis_ipv6_required: false
+    ubuntu22cis_sshd:
+      allow_users: "{{ ssh_allow_users | join(' ') }}"
+  roles:
+    - ubuntu22_cis

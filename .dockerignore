@@ -1,0 +1,14 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+tests
+docs
+terraform
+ansible
+detection
+reports
+scripts
+*.md
+.env*

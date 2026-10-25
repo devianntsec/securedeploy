@@ -1,0 +1,159 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  IMAGE_NAME: securedeploy
+
+jobs:
+  lint:
+    name: Lint (ruff + hadolint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}", cache: pip }
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: ruff format --check .
+      - uses: hadolint/hadolint-action@v3.1.0
+        with: { dockerfile: Dockerfile }
+
+  test:
+    name: Tests (pytest, cobertura >= 85%)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}", cache: pip }
+      - run: pip install -r requirements-dev.txt
+      - run: pytest
+
+  sast:
+    name: SAST (Bandit + Semgrep) y dependencias (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}", cache: pip }
+      - run: pip install -r requirements-dev.txt
+      - name: Bandit (falla en severidad media o superior)
+        run: bandit -r app -ll
+      - name: pip-audit (falla ante CVEs conocidos en dependencias)
+        run: pip-audit -r requirements.txt --strict
+      - name: Semgrep (aislado con pipx para no mezclar dependencias)
+        run: |
+          pipx install semgrep
+          semgrep scan --error --metrics=off \
+            --config p/python --config p/owasp-top-ten --config p/dockerfile \
+            --config .semgrep/securedeploy.yml \
+            app Dockerfile
+
+  trivy-fs:
+    name: "Trivy (repo - vulns, secretos, misconfig)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  image:
+    name: Build + Trivy (imagen)
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
+      - name: La imagen no corre como root
+        run: |
+          uid=$(docker run --rm --entrypoint id ${{ env.IMAGE_NAME }}:${{ github.sha }} -u)
+          echo "uid=$uid"; test "$uid" != "0"
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  iac:
+    name: IaC (terraform validate + Trivy config + ansible-lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: terraform fmt / validate
+        working-directory: terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: terraform
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}" }
+      - run: pip install ansible-lint
+      - run: cd ansible && ansible-lint --profile production site.yml audit.yml
+      - name: Validar reglas Falco (binario real, sin driver)
+        run: |
+          docker run --rm -v "$PWD/detection/falco:/rules:ro" falcosecurity/falco-no-driver:0.39.2 \
+            falco -V /rules/securedeploy_rules.yaml
+
+  deploy:
+    name: Deploy (ECR + SSM)
+    runs-on: ubuntu-latest
+    needs: [lint, test, sast, trivy-fs, image, iac]
+    if: github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ENABLED == 'true'
+    permissions:
+      id-token: write   # OIDC: sin claves de AWS de larga duración en GitHub
+      contents: read
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build y push (tag inmutable = SHA corto)
+        run: |
+          TAG=${GITHUB_SHA::7}
+          IMG=${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:$TAG
+          docker build -t "$IMG" .
+          docker push "$IMG"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+      - name: Desplegar vía SSM (sin SSH abierto)
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ vars.EC2_INSTANCE_ID }}" \
+            --document-name AWS-RunShellScript \
+            --parameters "commands=[\"echo $TAG > /etc/securedeploy/image_tag\",\"systemctl restart securedeploy\"]" \
+            --query Command.CommandId --output text)
+          aws ssm wait command-executed --command-id "$CMD_ID" --instance-id "${{ vars.EC2_INSTANCE_ID }}"
+      - name: Smoke test
+        run: |
+          for i in 1 2 3 4 5 6; do
+            curl -fsS "http://${{ vars.APP_HOST }}:8000/health" && exit 0 || sleep 10
+          done
+          exit 1

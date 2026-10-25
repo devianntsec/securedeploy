@@ -1,0 +1,15 @@
+---
+- name: SecureDeploy - hardening y despliegue
+  hosts: securedeploy
+  become: true
+  pre_tasks:
+    - name: Cargar variables generadas desde Terraform
+      ansible.builtin.include_vars:
+        file: group_vars/terraform.yml
+      failed_when: false
+  roles:
+    - base_hardening
+    - auditd
+    - docker
+    - falco
+    - app

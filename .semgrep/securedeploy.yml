@@ -1,0 +1,24 @@
+rules:
+  - id: securedeploy-subprocess-shell-true
+    languages: [python]
+    severity: ERROR
+    message: subprocess con shell=True permite inyección de comandos. Usa lista de argumentos.
+    pattern-either:
+      - pattern: subprocess.$FUNC(..., shell=True, ...)
+      - pattern: os.system(...)
+  - id: securedeploy-tls-verification-disabled
+    languages: [python]
+    severity: ERROR
+    message: No se debe desactivar la verificación TLS hacia la NVD ni hacia AWS.
+    pattern-either:
+      - pattern: httpx.$FUNC(..., verify=False, ...)
+      - pattern: httpx.AsyncClient(..., verify=False, ...)
+      - pattern: httpx.Client(..., verify=False, ...)
+  - id: securedeploy-no-secret-logging
+    languages: [python]
+    severity: WARNING
+    message: Posible log de un secreto/API key. Registra solo si está configurada, nunca su valor.
+    pattern-either:
+      - pattern: log.$LVL(..., $X.api_key, ...)
+      - pattern: log.$LVL(..., api_key, ...)
+      - pattern: print(..., api_key, ...)

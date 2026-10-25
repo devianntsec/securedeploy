@@ -1,0 +1,31 @@
+---
+- name: Instalar auditd
+  ansible.builtin.apt:
+    name: [auditd, audispd-plugins]
+    state: present
+
+- name: Reglas de auditoría (desde detection/auditd/)
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../detection/auditd/securedeploy.rules"
+    dest: /etc/audit/rules.d/securedeploy.rules
+    owner: root
+    group: root
+    mode: "0640"
+  notify: Load audit rules
+
+- name: Modo inmutable (opcional)
+  ansible.builtin.lineinfile:
+    path: /etc/audit/rules.d/99-finalize.rules
+    line: "-e 2"
+    create: true
+    owner: root
+    group: root
+    mode: "0640"
+  when: audit_immutable | bool
+  notify: Load audit rules
+
+- name: Habilitar auditd
+  ansible.builtin.service:
+    name: auditd
+    state: started
+    enabled: true

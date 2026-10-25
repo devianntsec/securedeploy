@@ -1,0 +1,9 @@
+---
+admin_cidr: ""                 # CIDR con SSH permitido en UFW (vacío = no abrir 22 en UFW; usa SSM)
+allowed_ingress_cidrs:         # mismos CIDRs que en Terraform
+  - 0.0.0.0/32                 # CAMBIAR
+ssh_allow_users: [ubuntu]
+audit_immutable: false         # true = auditd -e 2 (requiere reinicio para cambiar reglas)
+falco_enabled: true
+app_port: 8000
+app_image_tag: "{{ lookup('env', 'IMAGE_TAG') | default('dev', true) }}"

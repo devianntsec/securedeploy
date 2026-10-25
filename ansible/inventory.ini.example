@@ -1,0 +1,2 @@
+[securedeploy]
+203.0.113.20 ansible_user=ubuntu

@@ -1,0 +1,6 @@
+---
+- name: Restart securedeploy
+  ansible.builtin.systemd:
+    name: securedeploy
+    state: restarted
+    daemon_reload: true

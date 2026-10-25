@@ -1,0 +1,103 @@
+---
+- name: Falco
+  when: falco_enabled | bool
+  block:
+    - name: Dependencia para gestionar repositorios deb822
+      ansible.builtin.apt:
+        name: python3-debian
+        state: present
+
+    - name: Clave GPG de Falco
+      ansible.builtin.get_url:
+        url: https://falco.org/repo/falcosecurity-packages.asc
+        dest: /etc/apt/keyrings/falco.asc
+        mode: "0644"
+
+    - name: Repositorio de Falco
+      ansible.builtin.deb822_repository:
+        name: falcosecurity
+        types: [deb]
+        uris: https://download.falco.org/packages/deb
+        suites: [stable]
+        components: [main]
+        signed_by: /etc/apt/keyrings/falco.asc
+        state: present
+
+    - name: Instalar Falco (driver modern eBPF, sin diálogos)
+      ansible.builtin.apt:
+        name: falco
+        state: present
+        update_cache: true
+      environment:
+        FALCO_FRONTEND: noninteractive
+        FALCO_DRIVER_CHOICE: modern_ebpf
+
+    - name: Directorio de eventos de Falco
+      ansible.builtin.file:
+        path: /var/log/falco
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Configuración de Falco (JSON, fichero de eventos, alertas ante pérdida de eventos)
+      ansible.builtin.copy:
+        dest: /etc/falco/config.d/securedeploy.yaml
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          json_output: true
+          json_include_output_property: true
+          json_include_tags_property: true
+          time_format_iso_8601: true
+          priority: notice
+          buffered_outputs: false
+          syslog_output:
+            enabled: true
+          file_output:
+            enabled: true
+            keep_alive: false
+            filename: /var/log/falco/events.json
+          stdout_output:
+            enabled: false
+          # Si Falco pierde eventos, que se note (un atacante puede intentar saturarlo)
+          syscall_event_drops:
+            actions:
+              - log
+              - alert
+            rate: 0.03333
+            max_burst: 10
+      notify: Restart falco
+
+    - name: Rotación de /var/log/falco/events.json
+      ansible.builtin.copy:
+        dest: /etc/logrotate.d/falco-events
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          /var/log/falco/events.json {
+              daily
+              rotate 14
+              compress
+              missingok
+              notifempty
+              copytruncate
+          }
+
+    - name: Reglas propias (se validan con `falco -V` antes de instalarlas)
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../detection/falco/securedeploy_rules.yaml"
+        dest: /etc/falco/rules.d/securedeploy_rules.yaml
+        owner: root
+        group: root
+        mode: "0644"
+        validate: falco -V %s
+      notify: Restart falco
+
+    - name: Servicio de Falco
+      ansible.builtin.service:
+        name: falco-modern-bpf
+        state: started
+        enabled: true

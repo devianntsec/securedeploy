@@ -1,0 +1,42 @@
+---
+# Mide el hardening con Lynis y trae el reporte al repo (reports/<host>/).
+#   ansible-playbook audit.yml -e label=before
+#   ansible-playbook site.yml ...
+#   ansible-playbook audit.yml -e label=after
+- name: Auditoría de hardening (Lynis)
+  hosts: securedeploy
+  become: true
+  vars:
+    label: before
+  tasks:
+    - name: Instalar Lynis
+      ansible.builtin.apt:
+        name: lynis
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Ejecutar auditoría
+      ansible.builtin.command:
+        cmd: >-
+          lynis audit system --quick --no-colors
+          --logfile /var/log/lynis-{{ label }}.log
+          --report-file /var/log/lynis-report-{{ label }}.dat
+      changed_when: false
+
+    - name: Leer índice de hardening
+      ansible.builtin.shell:
+        cmd: set -o pipefail && grep '^hardening_index=' /var/log/lynis-report-{{ label }}.dat | cut -d= -f2
+        executable: /bin/bash
+      register: hindex
+      changed_when: false
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        msg: "Lynis hardening index ({{ label }}): {{ hindex.stdout }}"
+
+    - name: Traer reporte al repositorio
+      ansible.builtin.fetch:
+        src: "/var/log/lynis-report-{{ label }}.dat"
+        dest: "{{ playbook_dir }}/../reports/{{ inventory_hostname }}/"
+        flat: true

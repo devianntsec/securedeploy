@@ -1,0 +1,41 @@
+---
+- name: Directorio de configuración
+  ansible.builtin.file:
+    path: /etc/securedeploy
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Tag de imagen (no se pisa si CI ya desplegó uno)
+  ansible.builtin.copy:
+    dest: /etc/securedeploy/image_tag
+    content: "{{ app_image_tag }}\n"
+    owner: root
+    group: root
+    mode: "0640"
+    force: false
+
+- name: Script de arranque (lee el secreto con el rol IAM del host)
+  ansible.builtin.template:
+    src: securedeploy-run.sh.j2
+    dest: /usr/local/bin/securedeploy-run.sh
+    owner: root
+    group: root
+    mode: "0750"
+  notify: Restart securedeploy
+
+- name: Unidad systemd
+  ansible.builtin.template:
+    src: securedeploy.service.j2
+    dest: /etc/systemd/system/securedeploy.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart securedeploy
+
+- name: Habilitar el servicio
+  ansible.builtin.systemd:
+    name: securedeploy
+    enabled: true
+    daemon_reload: true

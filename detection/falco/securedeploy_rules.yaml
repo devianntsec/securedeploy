@@ -1,0 +1,482 @@
+# =============================================================================
+# SecureDeploy - reglas Falco (driver modern eBPF, Falco >= 0.35)
+# Se instalan en /etc/falco/rules.d/ vía Ansible (rol falco).
+#
+# Diseño
+#  - Autocontenidas: todo lo que usan lleva prefijo sd_ y NO depende de las
+#    macros/listas de falco_rules.yaml (no se rompen si Falco las renombra).
+#  - Una regla = un ID estable (SD-C## contenedor, SD-H## host, SD-X## ambos).
+#    Los IDs son los que usan scripts/test_falco.sh y docs/.
+#  - Todo lo "afinable" está en listas sd_* arriba: es lo único que tocas para
+#    suprimir falsos positivos.
+#  - comm de Linux se trunca a 15 caracteres: "amazon-ssm-agent" aparece como
+#    "amazon-ssm-agen" en proc.name. Las listas ya lo tienen en cuenta.
+#
+# Validar:  falco -V detection/falco/securedeploy_rules.yaml   (make falco-validate)
+# Probar:   scripts/test_falco.sh                              (en el host)
+# =============================================================================
+
+- required_engine_version: 0.35.0
+
+# ---------------------------------------------------------------------------
+# Listas (afinables)
+# ---------------------------------------------------------------------------
+- list: sd_shell_binaries
+  items: [sh, bash, dash, ash, zsh, ksh, csh, tcsh, fish, busybox]
+
+# Lo único que debe ejecutarse dentro del contenedor de la API:
+#  - uvicorn (PID 1)   - python (HEALTHCHECK: python -c "urllib...")
+- list: sd_expected_app_procs
+  items: [uvicorn, python, python3, python3.12]
+
+- list: sd_download_tools
+  items: [curl, wget, ftp, tftp, scp, sftp, rsync, aria2c, lwp-download]
+
+- list: sd_pkg_managers
+  items: [pip, pip3, apt, apt-get, apt-cache, aptitude, dpkg, apk, yum, dnf, npm, gem, cargo]
+
+# Herramientas de red/pivoteo que una API no necesita
+- list: sd_net_tools
+  items: [nc, ncat, netcat, socat, nmap, telnet, tcpdump, tshark, ssh, openssl, chisel, ligolo-agent]
+
+# Procesos legítimos de gestión de paquetes/sistema en el HOST
+- list: sd_pkg_procs
+  items: [dpkg, dpkg-preconfigu, apt, apt-get, apt-check, aptitude, unattended-upgr, unattended-upgrade,
+          needrestart, snap, snapd, update-alternati, ldconfig, ldconfig.real, depmod, pip, pip3,
+          systemd, systemd-sysusers, systemd-tmpfiles, cloud-init, cloud-init-local, ssm-agent-worke,
+          amazon-ssm-agen]
+
+# Procesos legítimos de gestión de cuentas en el HOST
+- list: sd_account_procs
+  items: [passwd, chpasswd, chage, chsh, chfn, newgrp, gpasswd, useradd, userdel, usermod, groupadd,
+          groupdel, groupmod, adduser, deluser, addgroup, delgroup, vipw, vigr, visudo, pwck, grpck,
+          pwconv, grpconv, unix_chkpwd, sudo, su, login, sshd, systemd-sysusers, cloud-init,
+          dpkg, dpkg-preconfigu, apt, apt-get]
+
+# Procesos que leen /etc/shadow o credenciales de forma legítima
+- list: sd_credential_readers
+  items: [sshd, ssh, ssh-agent, ssh-keygen, scp, sftp, sudo, su, login, passwd, chage, chpasswd,
+          unix_chkpwd, pwck, polkitd, systemd-logind, cron, atd, git, aws]
+
+# Procesos legítimos que hablan con el socket de Docker
+- list: sd_docker_clients
+  items: [docker, dockerd, containerd, containerd-shim, runc, docker-init, docker-proxy,
+          docker-compose, buildkitd, amazon-ssm-agen, ssm-agent-worke]
+
+# Procesos legítimos que consultan el servicio de metadatos (IMDS) en el HOST
+- list: sd_imds_clients
+  items: [aws, cloud-init, cloud-init-local, amazon-ssm-agen, ssm-agent-worke, ssm-session-wor,
+          chronyd, snapd, networkd-dispat, ec2-instance-con]
+
+- list: sd_log_managers
+  items: [logrotate, rsyslogd, systemd-journal, journald, auditd, falco, cron]
+
+- list: sd_miner_names
+  items: [xmrig, xmr-stak, minerd, cpuminer, ethminer, kdevtmpfsi, kinsing, kthreaddi, nbminer, t-rex, lolminer]
+
+- list: sd_offensive_tools
+  items: [nmap, masscan, zmap, hydra, medusa, john, hashcat, sqlmap, nikto, responder, mimikatz,
+          linpeas.sh, pspy, pspy64, chisel, ligolo-agent, msfconsole, msfvenom]
+
+# Puertos típicos de pools de minería y de reverse shells comunes
+- list: sd_suspicious_ports
+  items: [3333, 4444, 5555, 7777, 14433, 14444, 45560, 45700]
+
+- list: sd_system_bin_dirs
+  items: [/bin, /sbin, /usr/bin, /usr/sbin, /usr/local/bin, /usr/local/sbin, /lib/systemd/system,
+          /usr/lib/systemd/system, /boot]
+
+# Ficheros de identidad cuya modificación en el host es crítica
+- list: sd_identity_files
+  items: [/etc/passwd, /etc/shadow, /etc/group, /etc/gshadow, /etc/sudoers, /etc/ssh/sshd_config]
+
+- list: sd_sensitive_container_files
+  items: [/etc/shadow, /etc/gshadow, /var/run/docker.sock, /run/docker.sock, /run/securedeploy/env]
+
+# ---------------------------------------------------------------------------
+# Macros
+# ---------------------------------------------------------------------------
+# Contenedor de la API (docker run --name securedeploy ... ver securedeploy-run.sh.j2)
+- macro: sd_container
+  condition: (container.id != host and container.name = securedeploy)
+
+- macro: sd_host
+  condition: (container.id = host)
+
+- macro: sd_spawned_process
+  condition: (evt.type in (execve, execveat) and evt.dir = <)
+
+- macro: sd_open_write
+  condition: (evt.type in (open, openat, openat2) and evt.is_open_write = true and fd.typechar = 'f' and fd.num >= 0)
+
+- macro: sd_open_read
+  condition: (evt.type in (open, openat, openat2) and evt.is_open_read = true and fd.typechar = 'f' and fd.num >= 0)
+
+- macro: sd_outbound
+  condition: >
+    (((evt.type = connect and evt.dir = <)
+      or (evt.type in (sendto, sendmsg) and evt.dir = < and fd.l4proto != tcp and fd.connected = false and fd.name_changed = true))
+     and (fd.typechar = 4 or fd.typechar = 6)
+     and fd.ip != "0.0.0.0" and fd.net != "127.0.0.0/8" and fd.ip != "::1"
+     and (evt.rawres >= 0 or evt.res = EINPROGRESS))
+
+# runc prepara el contenedor con procesos "runc:[2:INIT]": no son actividad de la app
+- macro: sd_runc_setup
+  condition: (proc.name startswith runc)
+
+# Artefactos temporales de Ansible (escrituras atómicas durante `make harden`)
+- macro: sd_ansible_tmp
+  condition: (fd.name contains ".ansible_tmp" or fd.name contains "/.ansible/tmp/")
+
+# =============================================================================
+# CONTENEDOR DE LA API (SD-C##)
+# =============================================================================
+
+- rule: SD-C01 Shell dentro del contenedor SecureDeploy
+  desc: >
+    Se ejecutó un intérprete de comandos en el contenedor de la API. La imagen
+    no lo necesita en operación normal: es el indicador clásico de RCE/post-explotación.
+  condition: >
+    sd_spawned_process and sd_container and proc.name in (sd_shell_binaries)
+  output: >
+    Shell en contenedor SecureDeploy (user=%user.name uid=%user.uid cmd=%proc.cmdline
+    parent=%proc.pname pcmd=%proc.pcmdline tty=%proc.tty container=%container.name image=%container.image.repository)
+  priority: CRITICAL
+  tags: [securedeploy, container, mitre_execution, T1059]
+
+- rule: SD-C02 Proceso fuera de la lista permitida en el contenedor
+  desc: >
+    En el contenedor solo deben ejecutarse uvicorn y python (healthcheck).
+    Cualquier otro binario es anómalo (allowlist estricta).
+  condition: >
+    sd_spawned_process and sd_container
+    and not proc.name in (sd_expected_app_procs)
+    and not sd_runc_setup
+  output: >
+    Proceso inesperado en contenedor SecureDeploy (proc=%proc.name exe=%proc.exepath cmd=%proc.cmdline
+    user=%user.name parent=%proc.pname container=%container.name)
+  priority: WARNING
+  tags: [securedeploy, container, mitre_execution, T1059]
+
+- rule: SD-C03 Herramienta de descarga, red o paquetes en el contenedor
+  desc: curl/wget/pip/apt/nc... no forman parte del flujo normal; típico de staging de payloads o pivoteo.
+  condition: >
+    sd_spawned_process and sd_container
+    and (proc.name in (sd_download_tools) or proc.name in (sd_pkg_managers) or proc.name in (sd_net_tools))
+  output: >
+    Herramienta sospechosa en contenedor (proc=%proc.name cmd=%proc.cmdline user=%user.name
+    parent=%proc.pname container=%container.name)
+  priority: CRITICAL
+  tags: [securedeploy, container, mitre_command_and_control, T1105]
+
+- rule: SD-C04 Escritura en el sistema de ficheros del contenedor
+  desc: >
+    El contenedor corre con --read-only y solo /tmp (tmpfs noexec) es escribible.
+    Una escritura exitosa fuera de /tmp indica que alguien montó un volumen escribible,
+    escapó de la restricción, o toca /proc /sys.
+  condition: >
+    sd_open_write and sd_container
+    and not fd.name startswith /tmp/
+    and not fd.name in (/dev/null, /dev/stdout, /dev/stderr, /dev/tty)
+  output: >
+    Escritura inesperada en contenedor (file=%fd.name proc=%proc.name cmd=%proc.cmdline user=%user.name container=%container.name)
+  priority: ERROR
+  tags: [securedeploy, container, mitre_persistence, T1546]
+
+- rule: SD-C05 Intento de escritura bloqueado en el contenedor
+  desc: >
+    Intento de abrir un fichero para escribir que el kernel rechazó (EROFS/EACCES/EPERM).
+    Con el rootfs read-only esto es el primer rastro de alguien probando persistencia.
+  condition: >
+    evt.type in (open, openat, openat2) and evt.dir = < and evt.is_open_write = true
+    and evt.rawres < 0 and evt.res in (EROFS, EACCES, EPERM)
+    and sd_container
+    and not sd_runc_setup
+  output: >
+    Escritura bloqueada en contenedor (file=%evt.arg.name err=%evt.res proc=%proc.name cmd=%proc.cmdline
+    user=%user.name container=%container.name)
+  priority: WARNING
+  tags: [securedeploy, container, mitre_persistence, T1546]
+
+- rule: SD-C06 Conexión saliente fuera de política desde el contenedor
+  desc: La API solo habla con la NVD (443) y resuelve DNS (53). Cualquier otro puerto es egreso no autorizado.
+  condition: >
+    sd_outbound and sd_container
+    and not fd.sport in (443, 53)
+    and not fd.sip in ("169.254.169.254", "169.254.170.2")
+  output: >
+    Conexión saliente fuera de política (dst=%fd.sip:%fd.sport proto=%fd.l4proto proc=%proc.name
+    cmd=%proc.cmdline container=%container.name)
+  priority: WARNING
+  tags: [securedeploy, container, network, mitre_command_and_control, T1071]
+
+- rule: SD-C07 Acceso al servicio de metadatos (IMDS) desde el contenedor
+  desc: >
+    Ningún código del contenedor debe hablar con 169.254.169.254. Es la técnica
+    estándar de robo de credenciales vía SSRF (el hop limit=1 lo bloquea, pero el
+    intento ya es un indicador de explotación).
+  condition: >
+    sd_outbound and sd_container and fd.sip in ("169.254.169.254", "169.254.170.2")
+  output: >
+    Intento de acceso a IMDS desde contenedor (dst=%fd.sip:%fd.sport proc=%proc.name cmd=%proc.cmdline container=%container.name)
+  priority: CRITICAL
+  tags: [securedeploy, container, network, mitre_credential_access, T1552.005]
+
+- rule: SD-C08 Lectura de ficheros sensibles desde el contenedor
+  desc: >
+    Lectura de /etc/shadow, del socket de Docker, del env-file con la API key o de
+    /proc/*/environ (que contiene SD_NVD_API_KEY).
+  condition: >
+    sd_open_read and sd_container
+    and (fd.name in (sd_sensitive_container_files) or fd.name glob "/proc/*/environ")
+  output: >
+    Acceso a fichero sensible desde contenedor (file=%fd.name proc=%proc.name cmd=%proc.cmdline user=%user.name container=%container.name)
+  priority: CRITICAL
+  tags: [securedeploy, container, mitre_credential_access, T1552]
+
+- rule: SD-C09 Llamadas de sistema de escape o depuración en el contenedor
+  desc: ptrace, mount, carga de módulos o bpf dentro del contenedor, técnicas de escape o inspección de otros procesos.
+  condition: >
+    evt.type in (ptrace, mount, umount2, init_module, finit_module, bpf) and evt.dir = <
+    and sd_container and not sd_runc_setup
+  output: >
+    Syscall de escape en contenedor (syscall=%evt.type proc=%proc.name cmd=%proc.cmdline user=%user.name container=%container.name)
+  priority: CRITICAL
+  tags: [securedeploy, container, mitre_privilege_escalation, T1611]
+
+# =============================================================================
+# CONTENEDORES EN EL HOST
+# =============================================================================
+
+- rule: SD-H01 Contenedor privilegiado o ajeno a SecureDeploy iniciado en el host
+  desc: >
+    Arranque (PID 1) de un contenedor privilegiado, o de una imagen que no es del
+    repositorio ECR de SecureDeploy. Sirve contra "docker run --privileged -v /:/host".
+  condition: >
+    sd_spawned_process and container.id != host and proc.vpid = 1
+    and (container.privileged = true or not container.image.repository contains securedeploy)
+  output: >
+    Contenedor no autorizado o privilegiado (name=%container.name image=%container.image.repository:%container.image.tag
+    privileged=%container.privileged cmd=%proc.cmdline)
+  priority: CRITICAL
+  tags: [securedeploy, host, container, mitre_privilege_escalation, T1610]
+
+- rule: SD-H02 Acceso al socket de Docker por un proceso no autorizado
+  desc: Acceso al socket de Docker equivale a root en el host. Solo el cliente/daemon de Docker deben usarlo.
+  condition: >
+    evt.type = connect and evt.dir = < and fd.typechar = 'u' and fd.name endswith docker.sock
+    and sd_host and not proc.name in (sd_docker_clients)
+  output: >
+    Acceso a docker.sock por proceso no autorizado (proc=%proc.name cmd=%proc.cmdline user=%user.name parent=%proc.pname socket=%fd.name)
+  priority: WARNING
+  tags: [securedeploy, host, mitre_privilege_escalation, T1068]
+
+# =============================================================================
+# HOST - IDENTIDAD, PERSISTENCIA, INTEGRIDAD (SD-H##)
+# =============================================================================
+
+- rule: SD-H03 Modificación de ficheros de identidad en el host
+  desc: Escritura en passwd/shadow/group/sudoers/sshd_config por un proceso que no es una herramienta de gestión de cuentas.
+  condition: >
+    sd_open_write and sd_host
+    and (fd.name in (sd_identity_files) or fd.name startswith /etc/sudoers.d/)
+    and not proc.name in (sd_account_procs)
+    and not sd_ansible_tmp
+  output: >
+    Modificación de fichero de identidad (file=%fd.name proc=%proc.name cmd=%proc.cmdline user=%user.name parent=%proc.pname)
+  priority: CRITICAL
+  tags: [securedeploy, host, mitre_persistence, T1098, T1136]
+
+- rule: SD-H04 Clave SSH añadida (authorized_keys)
+  desc: Escritura en authorized_keys, persistencia por clave SSH.
+  condition: >
+    sd_open_write and sd_host
+    and (fd.name endswith "/.ssh/authorized_keys" or fd.name endswith "/.ssh/authorized_keys2")
+    and not proc.name in (cloud-init, sshd)
+    and not sd_ansible_tmp
+  output: >
+    authorized_keys modificado (file=%fd.name proc=%proc.name cmd=%proc.cmdline user=%user.name parent=%proc.pname)
+  priority: CRITICAL
+  tags: [securedeploy, host, mitre_persistence, T1098.004]
+
+- rule: SD-H05 Persistencia por cron, systemd, init o ld.so.preload
+  desc: >
+    Escritura en rutas de ejecución automática. /etc/ld.so.preload es además el
+    mecanismo de rootkits userland.
+  condition: >
+    sd_open_write and sd_host
+    and (fd.name startswith /etc/cron or fd.name startswith /var/spool/cron
+         or fd.name startswith /etc/systemd/system/ or fd.name startswith /usr/lib/systemd/system/
+         or fd.name startswith /etc/init.d/ or fd.name startswith /etc/profile.d/
+         or fd.name in (/etc/rc.local, /etc/ld.so.preload, /etc/environment))
+    and not proc.name in (sd_pkg_procs)
+    and not sd_ansible_tmp
+  output: >
+    Persistencia potencial (file=%fd.name proc=%proc.name cmd=%proc.cmdline user=%user.name parent=%proc.pname)
+  priority: ERROR
+  tags: [securedeploy, host, mitre_persistence, T1053, T1543, T1574.006]
+
+- rule: SD-H06 Escritura en directorios de binarios del sistema
+  desc: Cambio de binarios/unidades del sistema fuera de un gestor de paquetes (troyanización, implantes).
+  condition: >
+    sd_open_write and sd_host
+    and fd.directory in (sd_system_bin_dirs)
+    and not proc.name in (sd_pkg_procs)
+    and not sd_ansible_tmp
+  output: >
+    Escritura en directorio de binarios (file=%fd.name proc=%proc.name cmd=%proc.cmdline user=%user.name parent=%proc.pname)
+  priority: ERROR
+  tags: [securedeploy, host, mitre_persistence, mitre_defense_evasion, T1036, T1574]
+
+- rule: SD-H07 Binario SUID/SGID creado
+  desc: chmod que activa setuid/setgid, vía clásica de escalada y persistencia.
+  condition: >
+    sd_spawned_process and sd_host and proc.name = chmod
+    and (proc.args contains "u+s" or proc.args contains "g+s" or proc.args contains "+s "
+         or proc.args contains "4755" or proc.args contains "4777" or proc.args contains "4750"
+         or proc.args contains "6755" or proc.args contains "2755")
+  output: >
+    Bit SUID/SGID establecido (cmd=%proc.cmdline user=%user.name parent=%proc.pname)
+  priority: ERROR
+  tags: [securedeploy, host, mitre_privilege_escalation, T1548.001]
+
+- rule: SD-H08 Alta de usuario o grupo privilegiado en el host
+  desc: useradd/usermod/groupadd/adduser fuera de instalaciones de paquetes o cloud-init.
+  condition: >
+    sd_spawned_process and sd_host
+    and proc.name in (useradd, adduser, usermod, groupadd, addgroup, gpasswd, newusers)
+    and not proc.pname in (dpkg, dpkg-preconfigu, apt, apt-get, cloud-init, postinst, preinst, systemd)
+    and not proc.aname[2] in (dpkg, apt, apt-get, cloud-init, unattended-upgr)
+    and not proc.aname[3] in (dpkg, apt, apt-get, cloud-init, unattended-upgr)
+  output: >
+    Gestión de cuentas en el host (cmd=%proc.cmdline user=%user.name parent=%proc.pname pcmd=%proc.pcmdline)
+  priority: WARNING
+  tags: [securedeploy, host, mitre_persistence, T1136.001]
+
+- rule: SD-H09 Carga de módulo de kernel en el host
+  desc: >
+    Carga de un módulo/driver fuera del arranque normal. Relevante para rootkits
+    y BYOVD (driver vulnerable llevado por el atacante para neutralizar EDR/Falco).
+  condition: >
+    evt.type in (init_module, finit_module) and evt.dir = < and sd_host
+    and not proc.name in (systemd-udevd, systemd-modules, kmod)
+    and not (proc.name = modprobe and proc.pname in (systemd-udevd, systemd-modules, dockerd, containerd, kmod, ufw, iptables, nft, systemd))
+  output: >
+    Módulo de kernel cargado (proc=%proc.name cmd=%proc.cmdline user=%user.name parent=%proc.pname)
+  priority: CRITICAL
+  tags: [securedeploy, host, mitre_persistence, mitre_defense_evasion, T1547.006, T1014]
+
+# =============================================================================
+# HOST - EVASIÓN Y ANTI-FORENSE
+# =============================================================================
+
+- rule: SD-H10 Intento de detener o desactivar el stack de seguridad
+  desc: Parar o deshabilitar Falco, auditd, fail2ban, UFW o el agente SSM; vaciar o desactivar reglas de auditoría.
+  condition: >
+    sd_spawned_process and sd_host
+    and (
+      (proc.name in (systemctl, service)
+        and (proc.args contains "stop" or proc.args contains "disable" or proc.args contains "mask" or proc.args contains "kill")
+        and (proc.args contains "falco" or proc.args contains "auditd" or proc.args contains "fail2ban"
+             or proc.args contains "ufw" or proc.args contains "amazon-ssm-agent" or proc.args contains "apparmor"))
+      or (proc.name = auditctl and (proc.args contains "-D" or proc.args contains "-e 0" or proc.args contains "-e0"))
+      or (proc.name in (pkill, killall) and (proc.args contains "falco" or proc.args contains "auditd"))
+      or (proc.name = ufw and proc.args contains "disable")
+      or proc.name = aa-teardown
+    )
+  output: >
+    Intento de desactivar controles de seguridad (cmd=%proc.cmdline user=%user.name parent=%proc.pname pcmd=%proc.pcmdline)
+  priority: CRITICAL
+  tags: [securedeploy, host, mitre_defense_evasion, T1562.001]
+
+- rule: SD-H11 Borrado o truncado de logs e historial
+  desc: Truncado (O_TRUNC) de /var/log o de .bash_history, o rm/shred sobre logs fuera de logrotate.
+  condition: >
+    sd_host and (
+      (sd_open_write and evt.arg.flags contains O_TRUNC
+        and (fd.name startswith /var/log/ or fd.name endswith .bash_history or fd.name endswith .zsh_history)
+        and not proc.name in (sd_log_managers))
+      or
+      (sd_spawned_process and proc.name in (rm, shred, truncate, unlink)
+        and (proc.args contains "/var/log" or proc.args contains "bash_history" or proc.args contains "zsh_history")
+        and not proc.pname in (logrotate))
+    )
+  output: >
+    Manipulación de logs/historial (file=%fd.name proc=%proc.name cmd=%proc.cmdline user=%user.name parent=%proc.pname)
+  priority: ERROR
+  tags: [securedeploy, host, mitre_defense_evasion, T1070]
+
+- rule: SD-X01 Ejecución desde directorio temporal escribible
+  desc: >
+    Binario ejecutado desde /tmp, /var/tmp o /dev/shm (host o contenedor).
+    Los droppers y los exploits públicos casi siempre se ejecutan desde ahí.
+  condition: >
+    sd_spawned_process
+    and (proc.exepath startswith /tmp/ or proc.exepath startswith /var/tmp/
+         or proc.exepath startswith /dev/shm/ or proc.exepath startswith /run/shm/)
+  output: >
+    Ejecución desde directorio temporal (exe=%proc.exepath cmd=%proc.cmdline user=%user.name parent=%proc.pname container=%container.name)
+  priority: CRITICAL
+  tags: [securedeploy, host, container, mitre_execution, mitre_defense_evasion, T1059, T1036]
+
+- rule: SD-X02 Shell inverso (stdin/stdout/stderr redirigidos a un socket)
+  desc: Un proceso duplica un socket de red sobre fd 0/1/2, firma de bash -i >& /dev/tcp y de reverse shells en python/perl/nc.
+  condition: >
+    evt.type in (dup, dup2, dup3) and evt.dir = <
+    and evt.rawres in (0, 1, 2) and fd.type in (ipv4, ipv6)
+    and not sd_runc_setup
+  output: >
+    Redirección de stdio a socket de red (proc=%proc.name cmd=%proc.cmdline user=%user.name fd=%evt.rawres
+    conn=%fd.name parent=%proc.pname container=%container.name)
+  priority: CRITICAL
+  tags: [securedeploy, host, container, mitre_execution, mitre_command_and_control, T1059, T1071]
+
+- rule: SD-X03 Minería o herramientas ofensivas
+  desc: Ejecución de mineros de criptomonedas o herramientas de ataque/escaneo conocidas (por nombre de proceso).
+  condition: >
+    sd_spawned_process
+    and (proc.name in (sd_miner_names) or proc.name in (sd_offensive_tools))
+  output: >
+    Herramienta de minería u ofensiva (proc=%proc.name cmd=%proc.cmdline user=%user.name parent=%proc.pname container=%container.name)
+  priority: CRITICAL
+  tags: [securedeploy, host, container, mitre_impact, T1496]
+
+- rule: SD-X04 Conexión a puertos típicos de minería o C2
+  desc: Conexión saliente a puertos frecuentes de pools Stratum y listeners por defecto (Metasploit 4444, etc.).
+  condition: >
+    sd_outbound and fd.sport in (sd_suspicious_ports)
+  output: >
+    Conexión a puerto sospechoso (dst=%fd.sip:%fd.sport proc=%proc.name cmd=%proc.cmdline user=%user.name container=%container.name)
+  priority: WARNING
+  tags: [securedeploy, host, container, network, mitre_command_and_control, T1571]
+
+# =============================================================================
+# HOST - CREDENCIALES
+# =============================================================================
+
+- rule: SD-H12 Lectura de credenciales o claves privadas en el host
+  desc: >
+    Lectura de /etc/shadow, claves privadas SSH o credenciales AWS por procesos
+    que no son los consumidores legítimos.
+  condition: >
+    sd_open_read and sd_host
+    and (fd.name in (/etc/shadow, /etc/gshadow)
+         or fd.name glob "/home/*/.ssh/id_*" or fd.name glob "/root/.ssh/id_*"
+         or fd.name glob "/home/*/.aws/credentials" or fd.name glob "/root/.aws/credentials"
+         or fd.name = /run/securedeploy/env)
+    and not proc.name in (sd_credential_readers)
+    and not (fd.name = /run/securedeploy/env and proc.name in (docker, securedeploy-ru, bash))
+  output: >
+    Lectura de credenciales (file=%fd.name proc=%proc.name cmd=%proc.cmdline user=%user.name parent=%proc.pname)
+  priority: CRITICAL
+  tags: [securedeploy, host, mitre_credential_access, T1003.008, T1552.001, T1552.004]
+
+- rule: SD-H13 Consulta al servicio de metadatos (IMDS) desde un proceso inesperado del host
+  desc: Procesos que no son aws-cli/SSM/cloud-init pidiendo credenciales del rol de la instancia.
+  condition: >
+    sd_outbound and sd_host and fd.sip = "169.254.169.254"
+    and not proc.name in (sd_imds_clients)
+  output: >
+    Acceso a IMDS desde proceso inesperado (proc=%proc.name cmd=%proc.cmdline user=%user.name parent=%proc.pname)
+  priority: NOTICE
+  tags: [securedeploy, host, network, mitre_credential_access, T1552.005]

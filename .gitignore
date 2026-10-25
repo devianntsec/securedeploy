@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.env.*
+.coverage
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate*
+terraform/*.tfvars
+!terraform/terraform.tfvars.example
+terraform/tfplan
+# Ansible
+ansible/inventory.ini
+ansible/.collections/
+ansible/.roles/
+# Reportes locales (se versionan solo los resúmenes que elijas)
+reports/*
+!reports/.gitkeep

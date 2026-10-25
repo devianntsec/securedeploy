@@ -1,0 +1,18 @@
+[Unit]
+Description=SecureDeploy CVE API
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/securedeploy-run.sh
+ExecStop=/usr/bin/docker stop -t 10 securedeploy
+Restart=always
+RestartSec=10
+# El secreto se escribe solo en /run (tmpfs) con permisos 0600
+RuntimeDirectory=securedeploy
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

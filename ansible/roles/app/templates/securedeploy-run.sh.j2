@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Gestionado por Ansible. Arranca el contenedor con la API key leída de AWS Secrets Manager.
+# El contenedor NO tiene acceso a credenciales AWS (IMDS hop limit = 1); solo recibe la clave por env.
+set -euo pipefail
+
+REGION="{{ aws_region }}"
+REGISTRY="{{ ecr_registry }}"
+REPO="{{ ecr_repository_url }}"
+SECRET_ID="{{ secret_id }}"
+TAG="$(tr -d '[:space:]' < /etc/securedeploy/image_tag)"
+IMAGE="${REPO}:${TAG}"
+ENV_FILE="/run/securedeploy/env"
+
+umask 077
+: > "$ENV_FILE"
+echo "SD_AWS_REGION=${REGION}" >> "$ENV_FILE"
+
+if raw=$(aws secretsmanager get-secret-value --region "$REGION" --secret-id "$SECRET_ID" \
+          --query SecretString --output text 2>/dev/null); then
+  key=$(printf '%s' "$raw" | python3 -c '
+import json, sys
+raw = sys.stdin.read().strip()
+try:
+    d = json.loads(raw)
+    v = d.get("api_key", "") if isinstance(d, dict) else ""
+except ValueError:
+    v = raw
+print("" if v == "REPLACE_ME" else v)
+')
+  if [ -n "$key" ]; then echo "SD_NVD_API_KEY=${key}" >> "$ENV_FILE"; fi
+fi
+
+aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY" >/dev/null
+docker pull "$IMAGE"
+docker rm -f securedeploy >/dev/null 2>&1 || true
+
+exec docker run --rm --name securedeploy \
+  --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+  --cap-drop ALL --security-opt no-new-privileges:true \
+  --pids-limit 128 --memory 256m --cpus 0.5 \
+  --env-file "$ENV_FILE" \
+  -p {{ app_port }}:8000 \
+  "$IMAGE"

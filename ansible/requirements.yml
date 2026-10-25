@@ -1,0 +1,10 @@
+---
+collections:
+  - name: ansible.posix
+  - name: community.general
+roles:
+  # Rol CIS de la comunidad (Ubuntu 22.04). Fija un tag/commit concreto antes de usarlo en serio.
+  - name: ubuntu22_cis
+    src: https://github.com/ansible-lockdown/UBUNTU22-CIS
+    scm: git
+    version: main

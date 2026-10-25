@@ -1,0 +1,5 @@
+aws_region            = "us-east-1"
+allowed_ingress_cidrs = ["203.0.113.10/32"] # tu IP pública; evita 0.0.0.0/0
+admin_cidr            = "203.0.113.10/32"   # vacío = solo SSM
+ssh_key_name          = "mi-keypair"
+github_repo           = "devianntsec/securedeploy"
