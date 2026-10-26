@@ -180,6 +180,7 @@
     escapó de la restricción, o toca /proc /sys.
   condition: >
     sd_open_write and sd_container
+    and not sd_runc_setup
     and not fd.name startswith /tmp/
     and not fd.name in (/dev/null, /dev/stdout, /dev/stderr, /dev/tty)
   output: >

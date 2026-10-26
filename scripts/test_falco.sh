@@ -46,8 +46,10 @@ if ctr_up; then
   check SD-C06 "salida a puerto no permitido"   ctr python -c "import socket;s=socket.socket();s.settimeout(2);s.connect_ex(('1.1.1.1',8080))"
   check SD-C07 "acceso a IMDS desde contenedor" ctr python -c "import socket;s=socket.socket();s.settimeout(2);s.connect_ex(('169.254.169.254',80))"
   check SD-C08 "lectura de /proc/self/environ"  ctr python -c "open('/proc/self/environ').read()"
-  # C04 y C09 requieren un contenedor mal configurado (volumen escribible / privilegios): ver README
-  SKIPPED+=("SD-C04 (requiere volumen escribible)" "SD-C09 (requiere --privileged/CAP_SYS_PTRACE)")
+  # PTRACE_TRACEME: la syscall ptrace basta para la regla, aunque no haga nada útil
+  check SD-C09 "ptrace dentro del contenedor" ctr python -c "import ctypes; ctypes.CDLL(None).ptrace(0,0,0,0)"
+  # /dev/shm es un tmpfs escribible incluso con --read-only: escribir ahí es un staging típico
+  check SD-C04 "escritura fuera de /tmp (/dev/shm)" ctr python -c "open('/dev/shm/falco-test','w').write('x')"
 fi
 
 # ------------------------------ HOST ---------------------------------------
