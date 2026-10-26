@@ -98,10 +98,44 @@
     src: "{{ item }}"
   loop: "{{ allowed_ingress_cidrs }}"
 
+# Docker publica puertos con DNAT y sus reglas (cadena FORWARD) se evalúan ANTES que las de UFW:
+# sin esto, `ufw allow ... src` no protege el puerto del contenedor (verificado con scripts/test_firewall.sh).
+# DOCKER-USER es la cadena que Docker reserva para filtrar. Solo deja pasar a allowed_ingress_cidrs hacia app_port.
+# --ctorigdstport = puerto publicado en el host (antes del DNAT). Si la lista es el placeholder, cierra para todos.
+- name: Firewall - filtrar el puerto que Docker publica (DOCKER-USER)
+  ansible.builtin.blockinfile:
+    path: /etc/ufw/after.rules
+    marker: "# {mark} SECUREDEPLOY DOCKER-USER"
+    validate: /usr/sbin/iptables-restore --test --noflush %s
+    block: |
+      *filter
+      :DOCKER-USER - [0:0]
+      -A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+      -A DOCKER-USER -i docker0 -j RETURN
+      {% for cidr in allowed_ingress_cidrs %}
+      -A DOCKER-USER -p tcp -m conntrack --ctorigdstport {{ app_port }} --ctdir ORIGINAL -s {{ cidr }} -j RETURN
+      {% endfor %}
+      -A DOCKER-USER -p tcp -m conntrack --ctorigdstport {{ app_port }} --ctdir ORIGINAL -j DROP
+      -A DOCKER-USER -j RETURN
+      COMMIT
+  notify: Reload ufw
+
 - name: Activar UFW
   community.general.ufw:
     state: enabled
     logging: "on"
+
+# Si after.rules ya tenía el bloque (corrida anterior) el handler no se dispara, y las reglas pueden no estar en vivo.
+- name: Firewall - leer DOCKER-USER en vivo
+  ansible.builtin.command: iptables -S DOCKER-USER
+  register: base_hardening_docker_user
+  changed_when: false
+  failed_when: false
+
+- name: Firewall - recargar UFW si DOCKER-USER no está cargada
+  community.general.ufw:
+    state: reloaded
+  when: "'ctorigdstport' not in base_hardening_docker_user.stdout"
 
 - name: Fail2ban para SSH
   ansible.builtin.copy:

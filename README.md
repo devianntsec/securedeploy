@@ -52,3 +52,9 @@ sudo ./scripts/test_falco.sh SD-C01  # una sola
 jq -c '{t:.time,r:.rule,p:.priority,o:.output}' /var/log/falco/events.json | tail
 ```
 Durante `make harden` es normal ver alertas (apt, Docker, systemd tocando rutas vigiladas): al terminar, ejecuta el test y revisa las alertas que NO provocaste; añade el proceso legítimo a la lista `sd_*` correspondiente en vez de borrar la regla.
+
+## Firewall y Docker
+Docker publica puertos con DNAT y sus reglas se evalúan antes que las de UFW, así que `ufw allow ... from X` **no** filtra el puerto de un contenedor (medido: un cliente fuera de las reglas de UFW recibió `200` en `/health`). El rol `base_hardening` añade a `/etc/ufw/after.rules` un bloque sobre la cadena `DOCKER-USER` que solo deja pasar a `allowed_ingress_cidrs` hacia `app_port` y descarta el resto.
+```bash
+sudo ./scripts/test_firewall.sh   # en el host: un origen no autorizado debe quedar BLOQUEADO y uno autorizado, pasar
+```

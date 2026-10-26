@@ -53,6 +53,8 @@ Las reglas cubren el contenedor (shell, procesos fuera de allowlist, egreso, acc
 - **`sshd` parecía un reverse shell.** Cada conexión SSH duplica el socket sobre stdin/stdout, que es justo la firma que busca la regla. Excluí el binario real por ruta.
 - **1.600 alertas de ruido por una exclusión olvidada.** runc se reejecuta en cada `docker exec` y en cada healthcheck, y una de mis reglas no lo excluía. Medir el ruido en reposo, y no solo si las reglas disparan, fue lo que lo destapó.
 - **El CIS dejó a Docker sin contenedores.** Tras aplicarlo, `docker run` fallaba con `failed to mount ... overlay ... no such device`. La regla 1.1.1.6 escribe `install overlay /bin/true` y `blacklist overlay` en `/etc/modprobe.d/`, así que `modprobe overlay` terminaba con éxito sin cargar nada (`rc=0`) y el kernel no registraba el filesystem. Lo que más tiempo me costó: `docker info` seguía diciendo `Storage Driver: overlayfs`, porque solo informa qué snapshotter eligió Docker, no si el kernel puede montarlo. La prueba definitiva fue `grep overlay /proc/filesystems`. La excepción en `cis.yml` no bastaba, porque no deshace lo que una corrida anterior ya escribió; añadí `post_tasks` que quitan las líneas y cargan el módulo. Al principio no se ejecutaban porque corro el playbook con `--tags level1-server` y las tareas sin tag se saltan: necesitaron `tags: always`.
+- **UFW no protegía el puerto del contenedor.** `ufw allow 8000 from X` no filtraba nada: Docker publica con DNAT y su cadena `FORWARD` (`DOCKER-USER`, `DOCKER-FORWARD`) se evalúa antes que las `ufw-*`. Lo medí con un cliente falso en un namespace de red (`192.168.77.2`, fuera de toda regla): recibió `200` en `/health`. Además, el CIDR del 8000 seguía siendo el placeholder `0.0.0.0/32`, que no es "cualquier origen" sino una sola dirección. El arreglo es un bloque en `/etc/ufw/after.rules` sobre `DOCKER-USER` que solo deja pasar a `allowed_ingress_cidrs` hacia `app_port` (con `--ctorigdstport`, el puerto de host previo al DNAT) y descarta el resto. `scripts/test_firewall.sh` repite la medición: origen no autorizado bloqueado, autorizado alcanza el puerto. Primera corrida: el bloque estaba escrito en `after.rules` pero no cargado, y el test falló; hizo falta `ufw reload`. Sin la prueba, el playbook habría dicho "ok" con el puerto abierto.
+- **`vm.yml` y `cis.yml` se pisan.** `base_hardening` vuelve a poner el banner de SSH y la política de salida de UFW que el CIS había cambiado. El orden reproducible es siempre `vm.yml` y después `cis.yml`; medir con Lynis entre ambos mide una configuración a medias.
 - **El CI falló en 3 segundos.** El tag de `trivy-action` que usaba no existía (los tags llevan prefijo `v`). Aproveché para fijar la acción por SHA.
 - **ansible-lint pasaba en mi máquina y fallaba en el CI**, porque en local el paquete `ansible` trae colecciones que el CI no instalaba. Además migré `apt_repository` (deprecado) a `deb822_repository`.
 
@@ -60,9 +62,8 @@ Las reglas cubren el contenedor (shell, procesos fuera de allowlist, egreso, acc
 STRIDE con 15 amenazas mapeadas a sus controles y un playbook de respuesta con 5 escenarios, ambos en `docs/`. Las reglas de Falco están referenciadas por ID desde el playbook.
 
 ## Qué falta
+- Rellenar `allowed_ingress_cidrs` con los CIDRs reales (hoy es el placeholder, y el puerto queda cerrado para todos).
 - Aplicar Terraform en AWS y probar el despliegue por OIDC, Secrets Manager y SSM.
 - Investigar el warning que reaparece con el CIS y las 10 advertencias manuales del rol (1.1.1.10, 1.1.2.x, 1.2.1.x, 2.1.22).
-- Que el contenedor de la VM local sobreviva a un reinicio (hoy se lanza con `--rm` y sin `--restart`).
 - Protección de rama para que el merge quede bloqueado por los gates.
 - Rate limiting por cliente, firma de imágenes con cosign y fijar por SHA el resto de las acciones del workflow.
-- Comprobar cómo interactúa UFW con los puertos que publica Docker.
