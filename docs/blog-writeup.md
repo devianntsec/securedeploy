@@ -13,13 +13,22 @@ Una API FastAPI que consulta la NVD (`/health`, `/cves/{id}`, `/cves?keyword=&se
 ## La métrica
 Medí el hardening con Lynis **antes y después** de aplicar los roles de Ansible (SSH, sysctl, UFW, fail2ban, auditd, Docker y Falco) en una VM Ubuntu 22.04:
 
-| Métrica | Antes | Después |
-|---|---|---|
-| Lynis hardening index | 63 | 77 |
-| Warnings | 1 | 0 |
-| Suggestions | 48 | 35 |
+| Métrica | Antes | Roles propios | + CIS Level 1 |
+|---|---|---|---|
+| Lynis hardening index | 63 | 77 | 80 |
+| Warnings | 1 | 0 | 1 |
+| Suggestions | 48 | 35 | 33 |
 
-Reproducible con `make audit-before && make harden && make audit-after && make metrics`.
+Reproducible con `make audit-before && make harden && make audit-after && make metrics`; la última columna se obtiene con `make cis` y una nueva `make audit-after`. El CIS aporta 3 puntos más y 2 sugerencias menos, y reaparece 1 warning que los roles propios habían cerrado (no lo he investigado todavía).
+
+### Excepciones CIS documentadas
+Apliqué el rol de ansible-lockdown con `--tags level1-server` y desactivé tres reglas, cada una con su motivo en `ansible/cis.yml`:
+
+| Regla | Por qué la excluyo |
+|---|---|
+| 5.2.4 | Exige contraseña para `sudo`; Ansible y SSM necesitan `sudo` sin contraseña. |
+| 4.1.2 | Abre SSH desde cualquier origen; UFW ya lo restringe con `admin_cidr` en `base_hardening`. |
+| 1.1.1.6 | Bloquea el módulo `overlay` y Docker deja de poder crear contenedores. |
 
 ## Los gates del pipeline
 Cada push ejecuta siete jobs: Ruff y Hadolint, tests (17, cobertura 97,5 %, piso de 85 %), Bandit, Semgrep con reglas públicas y propias, pip-audit, Trivy sobre el repositorio, la imagen y el IaC, y ansible-lint. Los jobs duran entre 20 s y 1 min.
@@ -43,6 +52,7 @@ Las reglas cubren el contenedor (shell, procesos fuera de allowlist, egreso, acc
 - **Falco solo dispara la primera regla que coincide.** Mi regla "herramienta de paquetes en el contenedor" no saltaba nunca: otra regla más general, definida antes, coincidía con el mismo evento. La solución fue `rule_matching: all`. Sin la prueba automatizada no lo habría visto.
 - **`sshd` parecía un reverse shell.** Cada conexión SSH duplica el socket sobre stdin/stdout, que es justo la firma que busca la regla. Excluí el binario real por ruta.
 - **1.600 alertas de ruido por una exclusión olvidada.** runc se reejecuta en cada `docker exec` y en cada healthcheck, y una de mis reglas no lo excluía. Medir el ruido en reposo, y no solo si las reglas disparan, fue lo que lo destapó.
+- **El CIS dejó a Docker sin contenedores.** Tras aplicarlo, `docker run` fallaba con `failed to mount ... overlay ... no such device`. La regla 1.1.1.6 escribe `install overlay /bin/true` y `blacklist overlay` en `/etc/modprobe.d/`, así que `modprobe overlay` terminaba con éxito sin cargar nada (`rc=0`) y el kernel no registraba el filesystem. Lo que más tiempo me costó: `docker info` seguía diciendo `Storage Driver: overlayfs`, porque solo informa qué snapshotter eligió Docker, no si el kernel puede montarlo. La prueba definitiva fue `grep overlay /proc/filesystems`. La excepción en `cis.yml` no bastaba, porque no deshace lo que una corrida anterior ya escribió; añadí `post_tasks` que quitan las líneas y cargan el módulo. Al principio no se ejecutaban porque corro el playbook con `--tags level1-server` y las tareas sin tag se saltan: necesitaron `tags: always`.
 - **El CI falló en 3 segundos.** El tag de `trivy-action` que usaba no existía (los tags llevan prefijo `v`). Aproveché para fijar la acción por SHA.
 - **ansible-lint pasaba en mi máquina y fallaba en el CI**, porque en local el paquete `ansible` trae colecciones que el CI no instalaba. Además migré `apt_repository` (deprecado) a `deb822_repository`.
 
@@ -51,7 +61,8 @@ STRIDE con 15 amenazas mapeadas a sus controles y un playbook de respuesta con 5
 
 ## Qué falta
 - Aplicar Terraform en AWS y probar el despliegue por OIDC, Secrets Manager y SSM.
-- Rol CIS con su propio reporte y una segunda medición.
+- Investigar el warning que reaparece con el CIS y las 10 advertencias manuales del rol (1.1.1.10, 1.1.2.x, 1.2.1.x, 2.1.22).
+- Que el contenedor de la VM local sobreviva a un reinicio (hoy se lanza con `--rm` y sin `--restart`).
 - Protección de rama para que el merge quede bloqueado por los gates.
 - Rate limiting por cliente, firma de imágenes con cosign y fijar por SHA el resto de las acciones del workflow.
 - Comprobar cómo interactúa UFW con los puertos que publica Docker.

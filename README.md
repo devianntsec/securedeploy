@@ -37,7 +37,7 @@ make inventory && cd ansible && ansible-galaxy collection install -r requirement
 make audit-before          # métrica "antes"
 make harden IMAGE_TAG=<sha-ya-publicado-en-ECR>
 make audit-after && make metrics
-make cis                   # opcional: rol CIS (revisa primero con --check)
+make cis                   # opcional: rol CIS Level 1 (haz snapshot de la VM: --check no simula el rol completo)
 ```
 
 ## Falco: reglas y pruebas
@@ -52,10 +52,3 @@ sudo ./scripts/test_falco.sh SD-C01  # una sola
 jq -c '{t:.time,r:.rule,p:.priority,o:.output}' /var/log/falco/events.json | tail
 ```
 Durante `make harden` es normal ver alertas (apt, Docker, systemd tocando rutas vigiladas): al terminar, ejecuta el test y revisa las alertas que NO provocaste; añade el proceso legítimo a la lista `sd_*` correspondiente en vez de borrar la regla.
-
-## Estado y límites (honestidad)
-- **Verificado en local:** lint, formato, 17 tests, Bandit, Semgrep con reglas propias, sintaxis YAML.
-- **Sin ejecutar aún (no había AWS ni Terraform en el entorno donde se generó):** `terraform validate/plan`, `ansible-playbook`, Docker build, Trivy y Falco reales. Corre el primer `terraform validate` y `ansible-lint` en tu máquina o en el CI y corrige lo que salga.
-- El rol CIS (`ubuntu22_cis`) se instala desde GitHub en `main`: fija un tag y revisa sus variables antes de aplicar.
-- Reglas de Falco: sin validar con el binario real en el entorno donde se generaron (no había Falco). Corre `make falco-validate` primero. auditd sigue siendo una base genérica.
-- Las cifras del write-up (`docs/blog-writeup.md`) deben salir de tu ejecución real.
