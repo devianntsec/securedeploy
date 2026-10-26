@@ -20,3 +20,6 @@ ansible/.roles/
 # Reportes locales (se versionan solo los resúmenes que elijas)
 reports/*
 !reports/.gitkeep
+
+# Volcados de UI de Android (adb/uiautomator)
+ui_*.xml
