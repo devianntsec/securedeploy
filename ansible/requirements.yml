@@ -7,4 +7,4 @@ roles:
   - name: ubuntu22_cis
     src: https://github.com/ansible-lockdown/UBUNTU22-CIS
     scm: git
-    version: main
+    version: 3.1.0

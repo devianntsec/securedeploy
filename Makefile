@@ -31,7 +31,7 @@ inventory:
 harden:
 	cd ansible && ansible-playbook site.yml -e app_image_tag=$(IMAGE_TAG)
 cis:
-	cd ansible && ansible-galaxy install -r requirements.yml -p .roles && ansible-playbook cis.yml
+	cd ansible && ansible-galaxy install -r requirements.yml -p .roles && ansible-playbook cis.yml --tags level1-server
 audit-before:
 	cd ansible && ansible-playbook audit.yml -e label=before
 audit-after:

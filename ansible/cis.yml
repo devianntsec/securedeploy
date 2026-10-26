@@ -1,16 +1,41 @@
 ---
-# Aplica el benchmark CIS Ubuntu 22.04 con el rol de ansible-lockdown.
-# Revisa SIEMPRE el --check antes: ansible-playbook cis.yml --check --diff
+# Aplica el benchmark CIS Ubuntu 22.04 con el rol ansible-lockdown/UBUNTU22-CIS (fijado en requirements.yml).
+# OJO: las variables del rol llevan el prefijo ubtu22cis_. Con otro prefijo Ansible las ignora en silencio.
+# El nivel se elige con TAGS, no con variables: ejecutar SIEMPRE con --tags level1-server
+# (sin tags el rol aplica Level 2 y reglas de workstation; p. ej. desactiva ip_forward y rompe Docker).
+# --check no simula el rol completo (aborta en 1.1.1.10): usa snapshot de la VM como red de seguridad.
 - name: CIS Level 1 (ansible-lockdown)
   hosts: securedeploy
   become: true
   vars:
-    ubuntu22cis_disruption_high: false   # evita reglas que pueden dejarte sin acceso o romper Docker
-    ubuntu22cis_level_1: true
-    ubuntu22cis_level_2: false
-    ubuntu22cis_ipv4_required: true
-    ubuntu22cis_ipv6_required: false
-    ubuntu22cis_sshd:
-      allow_users: "{{ ssh_allow_users | join(' ') }}"
+    ubtu22cis_disruption_high: false     # evita reglas que pueden dejarte sin acceso o romper Docker
+    ubtu22cis_ipv4_required: true
+    ubtu22cis_ipv6_required: false
+    # Excepción documentada: 5.2.4 exige contraseña para sudo, pero Ansible y SSM necesitan sudo sin contraseña.
+    ubtu22cis_rule_5_2_4: false
+    # Excepción documentada: 4.1.2 abre SSH desde cualquier origen; UFW ya lo gestiona base_hardening con admin_cidr.
+    ubtu22cis_rule_4_1_2: false
+    # Excepción documentada: 1.1.1.6 bloquea el módulo overlay y Docker (overlayfs/containerd) no puede montar capas.
+    ubtu22cis_rule_1_1_1_6: false
+    ubtu22cis_sshd_allowusers: "{{ ssh_allow_users | join(' ') }}"
   roles:
     - ubuntu22_cis
+  post_tasks:
+    # Si una corrida anterior ya aplicó 1.1.1.6, deshacerlo (idempotente) y volver a cargar overlay.
+    - name: Quitar bloqueo del módulo overlay (install)
+      tags: always
+      ansible.builtin.lineinfile:
+        path: /etc/modprobe.d/CIS.conf
+        regexp: "^install overlay(\\s|$)"
+        state: absent
+    - name: Quitar bloqueo del módulo overlay (blacklist)
+      tags: always
+      ansible.builtin.lineinfile:
+        path: /etc/modprobe.d/blacklist.conf
+        regexp: "^blacklist overlay(\\s|$)"
+        state: absent
+    - name: Cargar módulo overlay
+      tags: always
+      community.general.modprobe:
+        name: overlay
+        state: present
